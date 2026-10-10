@@ -234,18 +234,6 @@ app.get('/api/devis/:id/files/:fileId', requireAuth, async (req, res) => {
 // l'admin (site/src/pages/Admin.jsx, SITE_IMAGE_GROUPS).
 const SITE_IMAGE_SLOTS = new Set([
   'home-hero',
-  'home-service-cartons',
-  'home-service-sacs-kraft',
-  'home-service-sacs-plastique',
-  'home-service-papier-de-soie',
-  'home-service-cartes-remerciement',
-  'home-service-autocollants',
-  'home-category-cartons',
-  'home-category-sacs-kraft',
-  'home-category-sacs-plastique',
-  'home-category-papier-de-soie',
-  'home-category-cartes-remerciement',
-  'home-category-autocollants',
   'service-cartons-boites',
   'service-sacs-kraft',
   'service-sacs-plastique',
