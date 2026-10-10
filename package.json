@@ -7,12 +7,14 @@
   "main": "server.js",
   "scripts": {
     "postinstall": "prisma generate",
-    "migrate": "prisma migrate dev --name init",
+    "db:push": "prisma db push",
     "create-admin": "node scripts/createAdmin.js",
     "start": "node server.js",
     "dev": "node --watch server.js"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1149.0",
+    "@aws-sdk/s3-request-presigner": "^3.1149.0",
     "@prisma/client": "^5.20.0",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",

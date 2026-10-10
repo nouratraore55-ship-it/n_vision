@@ -5,8 +5,17 @@ const JWT_SECRET = process.env.JWT_SECRET;
 const TOKEN_TTL = '12h';
 
 if (!JWT_SECRET) {
+  if (process.env.NODE_ENV === 'production') {
+    // En production, pas de filet de sécurité : sans vrai secret, n'importe qui
+    // pourrait fabriquer un token admin valide. On arrête le serveur plutôt que
+    // de démarrer avec une clé connue de tous.
+    console.error(
+      '❌ JWT_SECRET manquant en production — arrêt du serveur. Ajoute une valeur longue et aléatoire dans les variables d\'environnement.'
+    );
+    process.exit(1);
+  }
   console.warn(
-    '⚠️  JWT_SECRET manquant dans .env — les connexions admin ne seront pas sécurisées. Ajoute une valeur longue et aléatoire.'
+    '⚠️  JWT_SECRET manquant dans .env — utilisation d\'une clé de développement non sécurisée. Ajoute une valeur longue et aléatoire avant de déployer.'
   );
 }
 

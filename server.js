@@ -3,18 +3,29 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
-import path from 'node:path';
-import fs from 'node:fs';
 
 import { prisma } from './src/prismaClient.js';
 import { verifyPassword, signToken, requireAuth } from './src/auth.js';
-import { devisFileFields, siteImageUpload, UPLOAD_DIR } from './src/upload.js';
+import {
+  devisFileFields,
+  siteImageUpload,
+  devisFileKey,
+  siteImageKey,
+  uploadToR2,
+  getR2ObjectStream,
+  getR2SignedUrl,
+  deleteFromR2,
+} from './src/upload.js';
 import { notifyNewDevis } from './src/mailer.js';
 
 const PORT = process.env.PORT || 4000;
 const CORS_ORIGIN = process.env.CORS_ORIGIN || 'http://localhost:5173';
 
 const app = express();
+
+// Derrière un proxy (Vercel, Render, Railway, ...) il faut le dire à Express,
+// sinon express-rate-limit lit mal l'IP du client (ou plante carrément).
+app.set('trust proxy', 1);
 
 // Par défaut, Helmet empêche ce serveur d'être appelé depuis une autre origine
 // (même en local) — on l'autorise ici puisque le site (une autre origine) doit
@@ -44,8 +55,8 @@ app.get('/', (req, res) => {
   res.json({ ok: true, service: 'n-vision-backend' });
 });
 
-// SQLite (via Prisma) n'a pas de type Json natif : `details` est stocké en texte,
-// on le reconvertit en objet avant de le renvoyer au site.
+// `details` est stocké en texte JSON (même format qu'avant), on le reconvertit
+// en objet avant de le renvoyer au site.
 function serializeDevis(devis) {
   if (!devis) return devis;
   let details = {};
@@ -120,11 +131,15 @@ app.post('/api/devis', publicFormLimiter, (req, res, next) => {
     for (const kind of ['logo', 'designs', 'photos']) {
       const list = files[kind] || [];
       for (const f of list) {
+        // Les fichiers arrivent en mémoire (multer.memoryStorage) : on les
+        // envoie vers R2 ici, puis on garde seulement la clé en base.
+        const key = devisFileKey(f.originalname);
+        await uploadToR2(f.buffer, key, f.mimetype);
         fileRows.push({
           devisRequestId: devis.id,
           kind: kind === 'logo' ? 'logo' : kind === 'designs' ? 'design' : 'photo',
           originalName: f.originalname,
-          storedName: f.filename,
+          storedName: key,
           mimeType: f.mimetype,
           size: f.size,
         });
@@ -145,21 +160,31 @@ app.post('/api/devis', publicFormLimiter, (req, res, next) => {
 
 // Liste des demandes (admin uniquement)
 app.get('/api/devis', requireAuth, async (req, res) => {
-  const list = await prisma.devisRequest.findMany({
-    orderBy: { receivedAt: 'desc' },
-    include: { files: true },
-  });
-  res.json(list.map(serializeDevis));
+  try {
+    const list = await prisma.devisRequest.findMany({
+      orderBy: { receivedAt: 'desc' },
+      include: { files: true },
+    });
+    res.json(list.map(serializeDevis));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Une erreur est survenue.' });
+  }
 });
 
 // Détail d'une demande (admin uniquement)
 app.get('/api/devis/:id', requireAuth, async (req, res) => {
-  const devis = await prisma.devisRequest.findUnique({
-    where: { id: req.params.id },
-    include: { files: true },
-  });
-  if (!devis) return res.status(404).json({ error: 'Introuvable' });
-  res.json(serializeDevis(devis));
+  try {
+    const devis = await prisma.devisRequest.findUnique({
+      where: { id: req.params.id },
+      include: { files: true },
+    });
+    if (!devis) return res.status(404).json({ error: 'Introuvable' });
+    res.json(serializeDevis(devis));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Une erreur est survenue.' });
+  }
 });
 
 // Mise à jour du statut (admin uniquement)
@@ -180,15 +205,24 @@ app.patch('/api/devis/:id/status', requireAuth, async (req, res) => {
   }
 });
 
-// Téléchargement d'un fichier joint (admin uniquement — jamais public)
+// Téléchargement d'un fichier joint (admin uniquement — jamais public).
+// Le fichier vit sur R2 : on redirige vers une URL signée, valable 5 minutes,
+// qui force le téléchargement sous le nom d'origine.
 app.get('/api/devis/:id/files/:fileId', requireAuth, async (req, res) => {
-  const file = await prisma.devisFile.findUnique({ where: { id: req.params.fileId } });
-  if (!file || file.devisRequestId !== req.params.id) {
-    return res.status(404).json({ error: 'Fichier introuvable' });
+  try {
+    const file = await prisma.devisFile.findUnique({ where: { id: req.params.fileId } });
+    if (!file || file.devisRequestId !== req.params.id) {
+      return res.status(404).json({ error: 'Fichier introuvable' });
+    }
+    const url = await getR2SignedUrl(file.storedName, {
+      expiresIn: 300,
+      downloadFilename: file.originalName,
+    });
+    res.redirect(url);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Une erreur est survenue.' });
   }
-  const filePath = path.join(UPLOAD_DIR, file.storedName);
-  if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Fichier introuvable' });
-  res.download(filePath, file.originalName);
 });
 
 // ---------------------------------------------------------------------------
@@ -227,8 +261,8 @@ const SITE_IMAGE_SLOTS = new Set([
 
 // Envoi/remplacement d'une photo (admin uniquement)
 app.post('/api/site-images/:slot', requireAuth, (req, res, next) => {
-  // On vérifie l'emplacement AVANT de laisser multer écrire le fichier sur le
-  // disque, pour ne jamais enregistrer un fichier orphelin pour un slot inconnu.
+  // On vérifie l'emplacement AVANT de laisser multer traiter le fichier, pour
+  // ne jamais envoyer un fichier orphelin vers R2 pour un slot inconnu.
   if (!SITE_IMAGE_SLOTS.has(req.params.slot)) {
     return res.status(400).json({ error: 'Emplacement photo inconnu.' });
   }
@@ -247,15 +281,18 @@ app.post('/api/site-images/:slot', requireAuth, (req, res, next) => {
   try {
     const existing = await prisma.siteImage.findUnique({ where: { slot } });
 
+    const key = siteImageKey(slot, req.file.originalname);
+    await uploadToR2(req.file.buffer, key, req.file.mimetype);
+
     const image = await prisma.siteImage.upsert({
       where: { slot },
-      update: { filename: req.file.filename, mimeType: req.file.mimetype },
-      create: { slot, filename: req.file.filename, mimeType: req.file.mimetype },
+      update: { filename: key, mimeType: req.file.mimetype },
+      create: { slot, filename: key, mimeType: req.file.mimetype },
     });
 
-    // Supprime l'ancienne image du disque (remplacée par la nouvelle)
-    if (existing && existing.filename !== req.file.filename) {
-      fs.unlink(path.join(UPLOAD_DIR, existing.filename), () => {});
+    // Supprime l'ancienne image de R2 (remplacée par la nouvelle)
+    if (existing && existing.filename !== key) {
+      deleteFromR2(existing.filename);
     }
 
     res.status(201).json({
@@ -280,15 +317,18 @@ app.get('/api/site-images/:slot/meta', async (req, res) => {
 
 // Affichage public d'une photo du site (pas d'authentification : utilisée dans une balise <img>)
 app.get('/api/site-images/:slot/file', async (req, res) => {
-  const image = await prisma.siteImage.findUnique({ where: { slot: req.params.slot } });
-  if (!image) return res.status(404).end();
+  try {
+    const image = await prisma.siteImage.findUnique({ where: { slot: req.params.slot } });
+    if (!image) return res.status(404).end();
 
-  const filePath = path.join(UPLOAD_DIR, image.filename);
-  if (!fs.existsSync(filePath)) return res.status(404).end();
-
-  res.set('Cache-Control', 'no-cache');
-  res.type(image.mimeType);
-  fs.createReadStream(filePath).pipe(res);
+    const stream = await getR2ObjectStream(image.filename);
+    res.set('Cache-Control', 'no-cache');
+    res.type(image.mimeType);
+    stream.pipe(res);
+  } catch (err) {
+    console.error(err);
+    res.status(404).end();
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -356,6 +396,21 @@ app.put('/api/realisations/:slot', requireAuth, async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`N Vision backend démarré sur http://localhost:${PORT}`);
+// Filet de sécurité global : si une route plante sans avoir géré l'erreur
+// elle-même, on répond proprement plutôt que de laisser planter le process.
+app.use((err, req, res, next) => {
+  console.error(err);
+  if (res.headersSent) return next(err);
+  res.status(500).json({ error: 'Une erreur est survenue.' });
 });
+
+// En local (npm run dev / npm start) on démarre un vrai serveur HTTP. Sur
+// Vercel, `app` est importé par api/index.js et utilisé comme fonction
+// serverless — VERCEL=1 est défini automatiquement par leur plateforme.
+if (!process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`N Vision backend démarré sur http://localhost:${PORT}`);
+  });
+}
+
+export default app;

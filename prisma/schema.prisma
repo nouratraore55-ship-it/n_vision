@@ -3,7 +3,7 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
@@ -26,14 +26,15 @@ model DevisRequest {
   telephone  String?
   status     String      @default("nouveau") // nouveau | en_cours | devis_envoye
   // Toutes les autres réponses du questionnaire (souple : pas besoin de migration
-  // si les questions changent plus tard). Stocké en texte JSON — SQLite n'a pas
-  // de type Json natif dans Prisma.
+  // si les questions changent plus tard). Stocké en texte JSON — on garde le même
+  // format qu'avant (String) pour ne pas toucher le code qui le lit/l'écrit.
   details    String
   receivedAt DateTime    @default(now())
   files      DevisFile[]
 }
 
 // Fichiers envoyés par le client avec sa demande (logo, designs, photos produit)
+// Stockés sur Cloudflare R2 — storedName est la clé de l'objet dans le bucket.
 model DevisFile {
   id             String       @id @default(uuid())
   devisRequestId String
@@ -49,6 +50,7 @@ model DevisFile {
 // Photos gérées depuis l'admin et affichées publiquement sur le site
 // (ex : la photo du hero sur la page d'accueil). "slot" identifie
 // l'emplacement (ex: "home-hero") — un seul fichier par emplacement.
+// filename est la clé de l'objet dans le bucket R2.
 model SiteImage {
   slot      String   @id
   filename  String
