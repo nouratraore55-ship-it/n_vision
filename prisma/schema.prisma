@@ -1,0 +1,67 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// Comptes admin (toi, et plus tard ton équipe) qui peuvent se connecter à /admin
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String
+  name         String?
+  role         String   @default("admin")
+  createdAt    DateTime @default(now())
+}
+
+// Une demande de devis envoyée depuis le questionnaire du site
+model DevisRequest {
+  id         String      @id @default(uuid())
+  entreprise String
+  contact    String?
+  email      String
+  telephone  String?
+  status     String      @default("nouveau") // nouveau | en_cours | devis_envoye
+  // Toutes les autres réponses du questionnaire (souple : pas besoin de migration
+  // si les questions changent plus tard). Stocké en texte JSON — SQLite n'a pas
+  // de type Json natif dans Prisma.
+  details    String
+  receivedAt DateTime    @default(now())
+  files      DevisFile[]
+}
+
+// Fichiers envoyés par le client avec sa demande (logo, designs, photos produit)
+model DevisFile {
+  id             String       @id @default(uuid())
+  devisRequestId String
+  devisRequest   DevisRequest @relation(fields: [devisRequestId], references: [id])
+  kind           String // logo | design | photo
+  originalName   String
+  storedName     String
+  mimeType       String
+  size           Int
+  uploadedAt     DateTime     @default(now())
+}
+
+// Photos gérées depuis l'admin et affichées publiquement sur le site
+// (ex : la photo du hero sur la page d'accueil). "slot" identifie
+// l'emplacement (ex: "home-hero") — un seul fichier par emplacement.
+model SiteImage {
+  slot      String   @id
+  filename  String
+  mimeType  String
+  updatedAt DateTime @updatedAt
+}
+
+// Titre + description de chaque projet affiché sur la page "Réalisations".
+// La photo du projet est gérée séparément via SiteImage (même "slot",
+// ex: "realisation-1").
+model Realisation {
+  slot        String   @id
+  title       String
+  description String
+  updatedAt   DateTime @updatedAt
+}
