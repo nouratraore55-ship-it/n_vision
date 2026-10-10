@@ -55,6 +55,20 @@ app.get('/', (req, res) => {
   res.json({ ok: true, service: 'n-vision-backend' });
 });
 
+// Route de diagnostic TEMPORAIRE (a retirer une fois le probleme resolu) :
+// ne revele jamais la valeur complete de DATABASE_URL, seulement sa forme.
+app.get('/api/_debug-env', (req, res) => {
+  const dbUrl = process.env.DATABASE_URL || '';
+  res.json({
+    hasDatabaseUrl: Boolean(process.env.DATABASE_URL),
+    length: dbUrl.length,
+    startsOk: /^postgres(ql)?:\/\//.test(dbUrl),
+    first12: dbUrl.slice(0, 12),
+    last6: dbUrl.slice(-6),
+    hasNewlineOrSpace: /[\s]/.test(dbUrl),
+  });
+});
+
 // `details` est stocké en texte JSON (même format qu'avant), on le reconvertit
 // en objet avant de le renvoyer au site.
 function serializeDevis(devis) {
