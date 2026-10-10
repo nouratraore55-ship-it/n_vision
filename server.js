@@ -308,6 +308,27 @@ app.post('/api/site-images/:slot', requireAuth, (req, res, next) => {
   }
 });
 
+// Supprime la photo d'un emplacement (admin uniquement) : le site retombera
+// sur son visuel par défaut tant qu'une nouvelle photo n'est pas envoyée.
+app.delete('/api/site-images/:slot', requireAuth, async (req, res) => {
+  const { slot } = req.params;
+  if (!SITE_IMAGE_SLOTS.has(slot)) {
+    return res.status(400).json({ error: 'Emplacement photo inconnu.' });
+  }
+  try {
+    const existing = await prisma.siteImage.findUnique({ where: { slot } });
+    if (!existing) {
+      return res.status(404).json({ error: "Il n'y a pas de photo à cet emplacement." });
+    }
+    await deleteFromR2(existing.filename);
+    await prisma.siteImage.delete({ where: { slot } });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'La suppression a échoué.' });
+  }
+});
+
 // Type de fichier d'un emplacement (public, pas de contenu — juste de quoi savoir
 // si on doit afficher une balise <img> ou <video> côté site).
 app.get('/api/site-images/:slot/meta', async (req, res) => {
