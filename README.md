@@ -55,7 +55,7 @@ Cette commande met à jour ta base de données automatiquement (pas besoin de r�
 ## Mise à jour d'octobre : nouveau design
 
 - **Réalisations** : liste libre gérée depuis l'admin (ajouter, modifier, supprimer), avec titre, lieu, description et photo. Routes : `GET /api/realisations`, `POST /api/realisations`, `PUT /api/realisations/:id`, `DELETE /api/realisations/:id`. La photo d'une réalisation s'envoie via `POST /api/site-images/<id>`.
-- **Photos du site** : emplacements `home-hero` (photo ou vidéo), `home-valeurs`, `service-packaging`, `service-sacs`, `service-papier-de-soie`, `service-cartes`. Sans fichier, le site affiche son visuel par défaut (logo animé, dessins).
+- **Photos du site** : supprimées. Le site affiche toujours le logo animé et les dessins ; seules les réalisations ont des photos.
 - Aucun changement de base de données : rien à migrer.
 
 ## Mis en pause pour l'instant
