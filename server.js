@@ -233,9 +233,17 @@ app.get('/api/devis/:id/files/:fileId', requireAuth, async (req, res) => {
 
 // Emplacements autorisés — doit rester cohérent avec la liste utilisée dans
 // l'admin (site/src/pages/Admin.jsx, SITE_IMAGE_GROUPS).
-// Le site n'utilise plus de photos fixes (hero, services) : il affiche
-// toujours le logo animé et les dessins. Seules les réalisations ont des photos.
-const SITE_IMAGE_SLOTS = new Set([]);
+const SITE_IMAGE_SLOTS = new Set([
+  // Fond du hero (photo ou courte vidéo). Sans fichier : logo animé.
+  'accueil-hero',
+  // Photo de la section « Un emballage qui vous ressemble ». Sans fichier : case vide.
+  'accueil-valeurs',
+  // Les 4 cartes "Nos services" de l'accueil. Sans fichier : dessin.
+  'svc-packaging',
+  'svc-sacs',
+  'svc-papier',
+  'svc-cartes',
+]);
 
 // Les photos des réalisations utilisent le même système, avec pour
 // emplacement l'identifiant de la réalisation (ex: "real-lq3x9k2a").

@@ -111,7 +111,7 @@ export function devisFileKey(originalname) {
 // aussi une courte vidéo (fond animé), affichée avec une balise <video>.
 const SITE_IMAGE_MIME = new Set(['image/png', 'image/jpeg', 'image/webp']);
 const SITE_VIDEO_MIME = new Set(['video/mp4', 'video/webm']);
-const VIDEO_ALLOWED_SLOTS = new Set(['home-hero']);
+const VIDEO_ALLOWED_SLOTS = new Set(['accueil-hero']);
 
 function siteImageFilter(req, file, cb) {
   if (SITE_IMAGE_MIME.has(file.mimetype)) return cb(null, true);
