@@ -3,6 +3,7 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
+import crypto from 'node:crypto';
 
 import { prisma } from './src/prismaClient.js';
 import { verifyPassword, signToken, requireAuth } from './src/auth.js';
@@ -233,29 +234,32 @@ app.get('/api/devis/:id/files/:fileId', requireAuth, async (req, res) => {
 // Emplacements autorisés — doit rester cohérent avec la liste utilisée dans
 // l'admin (site/src/pages/Admin.jsx, SITE_IMAGE_GROUPS).
 const SITE_IMAGE_SLOTS = new Set([
+  // Fond du hero (photo ou courte vidéo). Sans fichier : logo animé.
   'home-hero',
-  'service-cartons-boites',
-  'service-sacs-kraft',
-  'service-sacs-plastique',
+  // Photo de la section « Un emballage qui vous ressemble ». Sans fichier : case vide.
+  'home-valeurs',
+  // Les 4 cartes "Nos services" de l'accueil. Sans fichier : dessin.
+  'service-packaging',
+  'service-sacs',
   'service-papier-de-soie',
-  'service-cartes-remerciement',
-  'service-autocollants',
-  'realisation-1',
-  'realisation-2',
-  'realisation-3',
-  'realisation-4',
-  'realisation-5',
-  'realisation-6',
+  'service-cartes',
 ]);
+
+// Les photos des réalisations utilisent le même système, avec pour
+// emplacement l'identifiant de la réalisation (ex: "real-lq3x9k2a").
+async function isAllowedSlot(slot) {
+  if (SITE_IMAGE_SLOTS.has(slot)) return true;
+  const r = await prisma.realisation.findUnique({ where: { slot } });
+  return Boolean(r);
+}
 
 // Envoi/remplacement d'une photo (admin uniquement)
 app.post('/api/site-images/:slot', requireAuth, (req, res, next) => {
   // On vérifie l'emplacement AVANT de laisser multer traiter le fichier, pour
   // ne jamais envoyer un fichier orphelin vers R2 pour un slot inconnu.
-  if (!SITE_IMAGE_SLOTS.has(req.params.slot)) {
-    return res.status(400).json({ error: 'Emplacement photo inconnu.' });
-  }
-  next();
+  isAllowedSlot(req.params.slot)
+    .then((ok) => (ok ? next() : res.status(400).json({ error: 'Emplacement photo inconnu.' })))
+    .catch(next);
 }, (req, res, next) => {
   siteImageUpload(req, res, (err) => {
     if (err) return res.status(400).json({ error: err.message });
@@ -300,10 +304,10 @@ app.post('/api/site-images/:slot', requireAuth, (req, res, next) => {
 // sur son visuel par défaut tant qu'une nouvelle photo n'est pas envoyée.
 app.delete('/api/site-images/:slot', requireAuth, async (req, res) => {
   const { slot } = req.params;
-  if (!SITE_IMAGE_SLOTS.has(slot)) {
-    return res.status(400).json({ error: 'Emplacement photo inconnu.' });
-  }
   try {
+    if (!(await isAllowedSlot(slot))) {
+      return res.status(400).json({ error: 'Emplacement photo inconnu.' });
+    }
     const existing = await prisma.siteImage.findUnique({ where: { slot } });
     if (!existing) {
       return res.status(404).json({ error: "Il n'y a pas de photo à cet emplacement." });
@@ -342,67 +346,121 @@ app.get('/api/site-images/:slot/file', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// RÉALISATIONS — titre + description de chaque projet (page "Réalisations")
-// La photo de chaque projet reste gérée via SiteImage, avec le même "slot".
+// RÉALISATIONS — liste libre gérée depuis l'admin (ajout, modification,
+// suppression). Chaque réalisation a un titre, un lieu, une description et
+// une photo (stockée via SiteImage, avec pour emplacement son identifiant).
+//
+// Pas de changement de base de données : on réutilise la table Realisation.
+//  - slot        = identifiant ("real-<horodatage>"), sert aussi à trier
+//  - title       = titre
+//  - description = texte JSON { text, lieu } (une ancienne description en
+//                  texte simple est relue telle quelle)
 // ---------------------------------------------------------------------------
 
-const REALISATION_SLOTS = [
-  'realisation-1',
-  'realisation-2',
-  'realisation-3',
-  'realisation-4',
-  'realisation-5',
-  'realisation-6',
-];
-
-// Contenu par défaut tant que l'admin n'a pas encore renseigné le projet.
-function defaultRealisation(slot) {
-  const n = slot.split('-')[1];
+function parseRealisation(row, imageSlots) {
+  let text = row.description || '';
+  let lieu = '';
+  try {
+    const d = JSON.parse(row.description);
+    if (d && typeof d === 'object') {
+      text = d.text || '';
+      lieu = d.lieu || '';
+    }
+  } catch {
+    // ancienne description en texte simple
+  }
   return {
-    slot,
-    title: `Projet ${n}`,
-    description: 'Description courte du projet, du besoin client et de la solution apportée.',
+    id: row.slot,
+    title: row.title,
+    lieu,
+    description: text,
+    hasImage: imageSlots.has(row.slot),
+    updatedAt: row.updatedAt,
   };
 }
 
-// Liste complète des réalisations (public — utilisée sur la page Réalisations du site)
+function packDescription(body) {
+  return JSON.stringify({
+    text: String(body.description || '').trim(),
+    lieu: String(body.lieu || '').trim(),
+  });
+}
+
+function newRealisationId() {
+  // horodatage en base 36 : les identifiants se trient dans l'ordre de création
+  return `real-${Date.now().toString(36)}${crypto.randomUUID().slice(0, 4)}`;
+}
+
+// Liste complète (public — utilisée sur le site)
 app.get('/api/realisations', async (req, res) => {
   try {
-    const rows = await prisma.realisation.findMany();
-    const bySlot = Object.fromEntries(rows.map((r) => [r.slot, r]));
-    const list = REALISATION_SLOTS.map((slot) => {
-      const saved = bySlot[slot];
-      return saved
-        ? { slot: saved.slot, title: saved.title, description: saved.description }
-        : defaultRealisation(slot);
+    const rows = await prisma.realisation.findMany({ orderBy: { slot: 'asc' } });
+    const images = await prisma.siteImage.findMany({
+      where: { slot: { in: rows.map((r) => r.slot) } },
+      select: { slot: true },
     });
-    res.json(list);
+    const imageSlots = new Set(images.map((i) => i.slot));
+    res.json(rows.map((r) => parseRealisation(r, imageSlots)));
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Une erreur est survenue.' });
   }
 });
 
-// Mise à jour du titre / de la description d'un projet (admin uniquement)
-app.put('/api/realisations/:slot', requireAuth, async (req, res) => {
-  const { slot } = req.params;
-  if (!REALISATION_SLOTS.includes(slot)) {
-    return res.status(400).json({ error: 'Emplacement de réalisation inconnu.' });
-  }
-  const { title, description } = req.body || {};
-  if (!title || !title.trim()) {
+// Ajout d'une réalisation (admin uniquement) — la photo s'envoie ensuite
+// via POST /api/site-images/<id>
+app.post('/api/realisations', requireAuth, async (req, res) => {
+  const { title } = req.body || {};
+  if (!title || !String(title).trim()) {
     return res.status(400).json({ error: 'Le titre est requis.' });
   }
   try {
-    const saved = await prisma.realisation.upsert({
-      where: { slot },
-      update: { title: title.trim(), description: (description || '').trim() },
-      create: { slot, title: title.trim(), description: (description || '').trim() },
+    const row = await prisma.realisation.create({
+      data: { slot: newRealisationId(), title: String(title).trim(), description: packDescription(req.body) },
     });
-    res.json({ ok: true, slot: saved.slot, title: saved.title, description: saved.description });
+    res.status(201).json(parseRealisation(row, new Set()));
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Une erreur est survenue lors de l'enregistrement." });
+  }
+});
+
+// Modification (admin uniquement)
+app.put('/api/realisations/:id', requireAuth, async (req, res) => {
+  const { title } = req.body || {};
+  if (!title || !String(title).trim()) {
+    return res.status(400).json({ error: 'Le titre est requis.' });
+  }
+  try {
+    const existing = await prisma.realisation.findUnique({ where: { slot: req.params.id } });
+    if (!existing) return res.status(404).json({ error: 'Réalisation introuvable.' });
+    const row = await prisma.realisation.update({
+      where: { slot: req.params.id },
+      data: { title: String(title).trim(), description: packDescription(req.body) },
+    });
+    const img = await prisma.siteImage.findUnique({ where: { slot: row.slot } });
+    res.json(parseRealisation(row, new Set(img ? [row.slot] : [])));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Une erreur est survenue lors de l'enregistrement." });
+  }
+});
+
+// Suppression, avec sa photo (admin uniquement)
+app.delete('/api/realisations/:id', requireAuth, async (req, res) => {
+  try {
+    const existing = await prisma.realisation.findUnique({ where: { slot: req.params.id } });
+    if (!existing) return res.status(404).json({ error: 'Réalisation introuvable.' });
+    const img = await prisma.siteImage.findUnique({ where: { slot: existing.slot } });
+    if (img) {
+      await deleteFromR2(img.filename);
+      await prisma.siteImage.delete({ where: { slot: existing.slot } });
+    }
+    await prisma.realisation.delete({ where: { slot: existing.slot } });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'La suppression a échoué.' });
   }
 });
 
